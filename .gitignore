@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 dist/
 build/
+.pytest_cache/
+*.wav
+*.onnx
+*.onnx.json
