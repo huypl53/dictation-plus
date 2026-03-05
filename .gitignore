@@ -1,10 +1,42 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
-.venv/
+*.egg
 dist/
 build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
 .pytest_cache/
-*.wav
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (downloaded at runtime)
 *.onnx
 *.onnx.json
+models/
+
+# Audio files
+*.wav
+*.mp3
+*.ogg
+
+# Config (user-specific)
+config.toml
