@@ -1,0 +1,12 @@
+[Unit]
+Description=Dictation Service (STT/TTS)
+After=network.target sound.target
+
+[Service]
+Type=simple
+ExecStart=%h/.venv/bin/dictation start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
