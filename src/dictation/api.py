@@ -1,7 +1,7 @@
 """FastAPI service for dictation."""
 from __future__ import annotations
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -36,22 +36,32 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
 
     @app.post("/tts")
     async def post_tts(req: TTSRequest):
+        if state.tts_engine is None:
+            raise HTTPException(status_code=503, detail="TTS engine not available")
         wav_bytes = state.tts_engine.synthesize(req.text)
         return Response(content=wav_bytes, media_type="audio/wav")
 
     @app.post("/stt/start")
-    async def stt_start():
+    async def stt_start(request: Request):
+        if state.stt_engine is None:
+            raise HTTPException(status_code=503, detail="STT engine not available")
         state.is_listening = True
-        return {"status": "listening", "ws_url": "ws://localhost:5678/ws/stt"}
+        host = request.headers.get("host", "localhost")
+        return {"status": "listening", "ws_url": f"ws://{host}/ws/stt"}
 
     @app.post("/stt/stop")
     async def stt_stop():
+        if state.stt_engine is None:
+            raise HTTPException(status_code=503, detail="STT engine not available")
         state.is_listening = False
         result = state.stt_engine.finalize()
         return {"text": result.text, "is_final": result.is_final}
 
     @app.websocket("/ws/stt")
     async def ws_stt(websocket: WebSocket):
+        if state.stt_engine is None:
+            await websocket.close(code=1013, reason="STT engine not available")
+            return
         await websocket.accept()
         try:
             while True:

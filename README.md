@@ -113,6 +113,48 @@ source .venv/bin/activate
 python -m pytest -v
 ```
 
+### E2E tests (Docker)
+
+Runs real Vosk STT and Piper TTS engines in an Ubuntu container — no models or dependencies needed on the host, just Docker.
+
+```bash
+# Run all 5 E2E tests
+bash tests/e2e/run_e2e.sh
+```
+
+Tests cover: status endpoint, real TTS synthesis, WebSocket STT, full TTS→STT round-trip, and CLI status.
+
+### Live demo (Docker)
+
+Start the full API server in Docker, exposed on your host:
+
+```bash
+# Start on default port 5678 (or pass a custom port)
+bash tests/e2e/demo.sh
+bash tests/e2e/demo.sh 9999   # custom port
+```
+
+Then from another terminal:
+
+```bash
+# Check status
+curl http://localhost:5678/status
+
+# Generate speech → save WAV
+curl -s -X POST http://localhost:5678/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Hello world, this is a test."}' \
+  -o /tmp/hello.wav
+
+# Play it
+aplay /tmp/hello.wav        # ALSA
+# or: ffplay -nodisp /tmp/hello.wav
+
+# Stream STT via WebSocket (using websocat)
+arecord -f S16_LE -r 16000 -c 1 -t raw | \
+  websocat ws://localhost:5678/ws/stt --binary
+```
+
 ## Architecture
 
 ```

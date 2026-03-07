@@ -71,9 +71,9 @@ class DictationDaemon:
         self._capture.stop()
         if self._stt:
             result = self._stt.finalize()
-            if result.text and self._last_partial:
-                # Replace partial with final
-                self._injector.backspace(len(self._last_partial))
+            if result.text:
+                if self._last_partial:
+                    self._injector.backspace(len(self._last_partial))
                 self._injector.type_text(result.text)
         self._last_partial = ""
         logger.info("Dictation stopped")
@@ -117,12 +117,10 @@ class DictationDaemon:
         tts = self._ensure_tts()
         app = create_app(stt_engine=stt, tts_engine=tts)
 
-        # Parse hotkey
+        # Parse hotkey — convert "super+d" to "<cmd>+d"
         hotkey_str = self._config.hotkey.replace("super", "<cmd>")
         hotkey = keyboard.HotKey(
-            keyboard.HotKey.parse(f"<{hotkey_str}>")
-            if "+" in hotkey_str
-            else keyboard.HotKey.parse(hotkey_str),
+            keyboard.HotKey.parse(hotkey_str),
             self.toggle_dictation,
         )
 

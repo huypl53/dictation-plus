@@ -53,10 +53,10 @@ async def test_post_tts_missing_text(client):
 
 @pytest.mark.asyncio
 async def test_post_stt_start(client):
-    resp = await client.post("/stt/start")
+    resp = await client.post("/stt/start", headers={"host": "localhost:9999"})
     assert resp.status_code == 200
     data = resp.json()
-    assert "ws_url" in data
+    assert data["ws_url"] == "ws://localhost:9999/ws/stt"
 
 
 @pytest.mark.asyncio
@@ -64,3 +64,33 @@ async def test_post_stt_stop(client, mock_stt):
     mock_stt.finalize.return_value = MagicMock(text="hello", is_final=True)
     resp = await client.post("/stt/stop")
     assert resp.status_code == 200
+
+
+@pytest.fixture
+def app_no_engines():
+    return create_app()
+
+
+@pytest.fixture
+async def client_no_engines(app_no_engines):
+    transport = ASGITransport(app=app_no_engines)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_tts_503_without_engine(client_no_engines):
+    resp = await client_no_engines.post("/tts", json={"text": "hello"})
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_stt_start_503_without_engine(client_no_engines):
+    resp = await client_no_engines.post("/stt/start")
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_stt_stop_503_without_engine(client_no_engines):
+    resp = await client_no_engines.post("/stt/stop")
+    assert resp.status_code == 503

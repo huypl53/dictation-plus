@@ -1,6 +1,7 @@
 """Model download and management."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -36,13 +37,24 @@ class ModelManager:
         (self.models_dir / "piper").mkdir(parents=True, exist_ok=True)
 
     def download_vosk_model(self, model_name: str) -> Path:
-        """Download a Vosk model. Uses Vosk's built-in download."""
+        """Download a Vosk model to our models directory."""
         self.ensure_dirs()
-        from vosk import Model
-        # Vosk auto-downloads when model_name is used
-        model = Model(model_name=model_name)
-        # Copy/symlink to our models dir if needed
-        return self.vosk_model_path(model_name)
+        import tempfile
+        import urllib.request
+        import zipfile
+
+        url = f"https://alphacephei.com/vosk/models/{model_name}.zip"
+        dest = self.vosk_model_path(model_name)
+        fd, tmp = tempfile.mkstemp(suffix=".zip")
+        zip_path = Path(tmp)
+        try:
+            os.close(fd)
+            urllib.request.urlretrieve(url, zip_path)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(self.models_dir / "vosk")
+        finally:
+            zip_path.unlink(missing_ok=True)
+        return dest
 
     def download_piper_voice(self, voice_name: str) -> Path:
         """Download a Piper voice model."""
