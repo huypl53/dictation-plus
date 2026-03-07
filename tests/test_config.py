@@ -1,7 +1,9 @@
 """Tests for configuration loading."""
+import sys
 import pytest
 from pathlib import Path
-from dictation.config import DictationConfig, load_config, DEFAULT_CONFIG
+from unittest.mock import patch
+from dictation.config import DictationConfig, load_config, DEFAULT_CONFIG, _default_data_dir, _default_config_path
 
 
 def test_default_config_values():
@@ -11,7 +13,24 @@ def test_default_config_values():
     assert config.stt_model == "vosk-model-small-en-us-0.15"
     assert config.stt_language == "en"
     assert config.tts_voice == "en_US-lessac-medium"
-    assert config.models_dir == Path.home() / ".local" / "share" / "dictation" / "models"
+
+
+@patch("dictation.config.sys")
+def test_default_paths_macos(mock_sys):
+    mock_sys.platform = "darwin"
+    data_dir = _default_data_dir()
+    config_path = _default_config_path()
+    assert "Library/Application Support/dictation" in str(data_dir)
+    assert "Library/Application Support/dictation/config.toml" in str(config_path)
+
+
+@patch("dictation.config.sys")
+def test_default_paths_linux(mock_sys):
+    mock_sys.platform = "linux"
+    data_dir = _default_data_dir()
+    config_path = _default_config_path()
+    assert ".local/share/dictation" in str(data_dir)
+    assert ".config/dictation/config.toml" in str(config_path)
 
 
 def test_load_config_from_toml(tmp_path):

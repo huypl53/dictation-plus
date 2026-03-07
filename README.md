@@ -2,7 +2,7 @@
 
 Lightweight local dictation service with real-time speech-to-text and text-to-speech. Runs entirely on CPU, no GPU required.
 
-Uses [Vosk](https://alphacephei.com/vosk/) for streaming STT and [Piper](https://github.com/rhasspy/piper) for neural TTS.
+Uses [Vosk](https://alphacephei.com/vosk/) (Linux) or [Whisper](https://github.com/SYSTRAN/faster-whisper) (macOS) for STT and [Piper](https://github.com/rhasspy/piper) for neural TTS.
 
 ## Features
 
@@ -16,19 +16,27 @@ Uses [Vosk](https://alphacephei.com/vosk/) for streaming STT and [Piper](https:/
 ## Requirements
 
 - Python 3.11+
-- Linux (X11 or Wayland)
-- `xdotool` (X11) or `wtype` (Wayland) for system-wide typing
-- PortAudio (`libportaudio2`) for audio capture/playback
+- Linux (X11 or Wayland) or macOS
+- PortAudio for audio capture/playback
+- Linux: `xdotool` (X11) or `wtype` (Wayland) for text injection
+- macOS: Accessibility permissions for hotkey and text injection
 
 ### System dependencies
 
 ```bash
-# Debian/Ubuntu
+# Debian/Ubuntu (X11)
 sudo apt install xdotool libportaudio2
 
-# Wayland
+# Debian/Ubuntu (Wayland)
 sudo apt install wtype libportaudio2
+
+# macOS
+brew install portaudio
 ```
+
+> **macOS note:** On first run, macOS will prompt you to grant Accessibility permissions
+> to your terminal (or the app running dictation) in **System Settings > Privacy & Security > Accessibility**.
+> This is required for global hotkey detection and text injection.
 
 ## Install
 
@@ -84,7 +92,10 @@ WebSocket for real-time streaming: `ws://localhost:5678/ws/stt`
 
 ## Configuration
 
-Create `~/.config/dictation/config.toml`:
+Create the config file at the platform-appropriate location:
+
+- **Linux:** `~/.config/dictation/config.toml`
+- **macOS:** `~/Library/Application Support/dictation/config.toml`
 
 ```toml
 [general]
@@ -92,18 +103,29 @@ hotkey = "super+d"
 api_port = 5678
 
 [stt]
+engine = "vosk"              # "vosk" (Linux default) or "whisper" (macOS default)
 model = "vosk-model-small-en-us-0.15"
 language = "en"
+whisper_model = "tiny"       # tiny, base, small, medium, large-v3
 
 [tts]
 voice = "en_US-lessac-medium"
 ```
 
-## Autostart (systemd)
+## Autostart
+
+### Linux (systemd)
 
 ```bash
 cp contrib/dictation.service ~/.config/systemd/user/
 systemctl --user enable --now dictation
+```
+
+### macOS (launchd)
+
+```bash
+cp contrib/com.dictation.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.dictation.plist
 ```
 
 ## Development
@@ -160,9 +182,9 @@ arecord -f S16_LE -r 16000 -c 1 -t raw | \
 ```
 dictation start
   └─ DictationDaemon
-       ├─ Vosk STT (streaming recognition)
+       ├─ Vosk/Whisper STT (speech recognition)
        ├─ Piper TTS (on-demand synthesis)
        ├─ FastAPI (REST + WebSocket on localhost:5678)
        ├─ pynput (global hotkey listener)
-       └─ xdotool/wtype (text injection into focused window)
+       └─ xdotool/wtype/AppleScript (text injection into focused window)
 ```

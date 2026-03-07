@@ -8,7 +8,7 @@ from dictation.audio import AudioCapture, AudioPlayback
 from dictation.config import DictationConfig, load_config
 from dictation.injector import TextInjector
 from dictation.models import ModelManager
-from dictation.stt import STTEngine
+from dictation.stt import STTEngine, STTResult
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +30,19 @@ class DictationDaemon:
         self._stt: STTEngine | None = None
         self._tts = None
 
-    def _ensure_stt(self) -> STTEngine:
+    def _ensure_stt(self):
         if self._stt is None:
-            model_path = self._model_mgr.vosk_model_path(self._config.stt_model)
-            if not self._model_mgr.is_vosk_model_available(self._config.stt_model):
-                logger.info("Downloading Vosk model: %s", self._config.stt_model)
-                self._model_mgr.download_vosk_model(self._config.stt_model)
-            self._stt = STTEngine(model_path=str(model_path))
+            engine = self._config.stt_engine
+            if engine == "whisper":
+                from dictation.stt_whisper import WhisperSTTEngine
+                logger.info("Using Whisper STT (model: %s)", self._config.whisper_model)
+                self._stt = WhisperSTTEngine(model_size=self._config.whisper_model)
+            else:
+                model_path = self._model_mgr.vosk_model_path(self._config.stt_model)
+                if not self._model_mgr.is_vosk_model_available(self._config.stt_model):
+                    logger.info("Downloading Vosk model: %s", self._config.stt_model)
+                    self._model_mgr.download_vosk_model(self._config.stt_model)
+                self._stt = STTEngine(model_path=str(model_path))
         return self._stt
 
     def _ensure_tts(self):

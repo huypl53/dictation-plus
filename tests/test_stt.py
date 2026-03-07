@@ -1,8 +1,13 @@
 """Tests for STT engine."""
 import json
+import sys
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from dictation.stt import STTEngine, STTResult
+from unittest.mock import MagicMock, patch
+from dictation.stt import STTResult
+
+# Ensure vosk module is mockable even on macOS where it's not installed
+if "vosk" not in sys.modules:
+    sys.modules["vosk"] = MagicMock()
 
 
 def test_stt_result_dataclass():
@@ -16,17 +21,19 @@ def test_stt_result_partial():
     assert result.is_final is False
 
 
-@patch("dictation.stt.KaldiRecognizer")
-@patch("dictation.stt.Model")
+@patch("vosk.KaldiRecognizer")
+@patch("vosk.Model")
 def test_stt_engine_init(mock_model_cls, mock_rec_cls):
+    from dictation.stt import STTEngine
     engine = STTEngine(model_path="/fake/model")
     mock_model_cls.assert_called_once_with(model_path="/fake/model")
     assert engine.sample_rate == 16000
 
 
-@patch("dictation.stt.KaldiRecognizer")
-@patch("dictation.stt.Model")
+@patch("vosk.KaldiRecognizer")
+@patch("vosk.Model")
 def test_stt_engine_process_audio_partial(mock_model_cls, mock_rec_cls):
+    from dictation.stt import STTEngine
     engine = STTEngine(model_path="/fake/model")
     mock_rec = mock_rec_cls.return_value
     mock_rec.AcceptWaveform.return_value = 0
@@ -37,9 +44,10 @@ def test_stt_engine_process_audio_partial(mock_model_cls, mock_rec_cls):
     assert result.is_final is False
 
 
-@patch("dictation.stt.KaldiRecognizer")
-@patch("dictation.stt.Model")
+@patch("vosk.KaldiRecognizer")
+@patch("vosk.Model")
 def test_stt_engine_process_audio_final(mock_model_cls, mock_rec_cls):
+    from dictation.stt import STTEngine
     engine = STTEngine(model_path="/fake/model")
     mock_rec = mock_rec_cls.return_value
     mock_rec.AcceptWaveform.return_value = 1
@@ -50,18 +58,20 @@ def test_stt_engine_process_audio_final(mock_model_cls, mock_rec_cls):
     assert result.is_final is True
 
 
-@patch("dictation.stt.KaldiRecognizer")
-@patch("dictation.stt.Model")
+@patch("vosk.KaldiRecognizer")
+@patch("vosk.Model")
 def test_stt_engine_reset(mock_model_cls, mock_rec_cls):
+    from dictation.stt import STTEngine
     engine = STTEngine(model_path="/fake/model")
     engine.reset()
     # After reset, a new recognizer should be created
     assert mock_rec_cls.call_count == 2
 
 
-@patch("dictation.stt.KaldiRecognizer")
-@patch("dictation.stt.Model")
+@patch("vosk.KaldiRecognizer")
+@patch("vosk.Model")
 def test_stt_engine_finalize(mock_model_cls, mock_rec_cls):
+    from dictation.stt import STTEngine
     engine = STTEngine(model_path="/fake/model")
     with patch.object(engine, "_recognizer") as mock_rec:
         mock_rec.FinalResult.return_value = json.dumps({"text": "final text"})

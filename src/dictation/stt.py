@@ -1,10 +1,8 @@
-"""Speech-to-text engine using Vosk."""
+"""Speech-to-text engine abstraction and Vosk implementation."""
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-
-from vosk import Model, KaldiRecognizer
 
 
 @dataclass
@@ -23,6 +21,8 @@ class STTEngine:
         lang: str | None = None,
         sample_rate: int = 16000,
     ):
+        from vosk import Model, KaldiRecognizer
+
         if model_path:
             self._model = Model(model_path=model_path)
         elif model_name:
@@ -51,4 +51,5 @@ class STTEngine:
 
     def reset(self) -> None:
         """Reset the recognizer for a new utterance."""
+        from vosk import KaldiRecognizer
         self._recognizer = KaldiRecognizer(self._model, self.sample_rate)

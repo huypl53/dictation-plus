@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "Lightweight local dictation service with STT and TTS"
 requires-python = ">=3.11"
 dependencies = [
-    "vosk>=0.3.45",
-    "piper-tts>=1.2.0",
+    "vosk>=0.3.45; sys_platform != 'darwin'",
+    "faster-whisper>=1.0.0; sys_platform == 'darwin'",
+    "piper-tts>=1.4.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "sounddevice>=0.5.0",
