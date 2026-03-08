@@ -7,10 +7,27 @@ import io
 import struct
 import uuid
 import wave
+from typing import Any, Protocol
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
+
+from dictation.stt import STTResult
+
+
+class STTEngineProto(Protocol):
+    """Protocol shared by STTEngine and WhisperSTTEngine."""
+
+    def process_audio(self, data: bytes) -> STTResult: ...
+    def finalize(self) -> STTResult: ...
+    def reset(self) -> None: ...
+
+
+class TTSEngineProto(Protocol):
+    """Protocol for TTS engines."""
+
+    def synthesize(self, text: str) -> bytes: ...
 
 
 class SpeechRequest(BaseModel):
@@ -25,13 +42,20 @@ class SpeechRequest(BaseModel):
 class DictationState:
     """Shared state for the API."""
 
-    def __init__(self, stt_engine=None, tts_engine=None):
-        self.stt_engine = stt_engine
-        self.tts_engine = tts_engine
-        self.is_listening = False
+    def __init__(
+        self,
+        stt_engine: STTEngineProto | None = None,
+        tts_engine: TTSEngineProto | None = None,
+    ):
+        self.stt_engine: STTEngineProto | None = stt_engine
+        self.tts_engine: TTSEngineProto | None = tts_engine
+        self.is_listening: bool = False
 
 
-def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
+def create_app(
+    stt_engine: STTEngineProto | None = None,
+    tts_engine: TTSEngineProto | None = None,
+) -> FastAPI:
     app = FastAPI(title="Dictation Service")
     state = DictationState(stt_engine=stt_engine, tts_engine=tts_engine)
     app.state.dictation = state
@@ -46,10 +70,10 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
         }
 
     @app.post("/stop")
-    async def stop_listening():
+    async def stop_listening() -> dict[str, str]:
         if state.stt_engine is None:
             raise HTTPException(status_code=503, detail="STT engine not available")
-        was_listening = state.is_listening
+        was_listening: bool = state.is_listening
         state.is_listening = False
         if was_listening:
             result = state.stt_engine.finalize()
@@ -60,7 +84,7 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
     # ── TTS: POST /v1/audio/speech ──────────────────────────────────────
 
     @app.post("/v1/audio/speech")
-    async def create_speech(req: SpeechRequest):
+    async def create_speech(req: SpeechRequest) -> Response:
         if state.tts_engine is None:
             raise HTTPException(status_code=503, detail="TTS engine not available")
         if req.response_format not in ("wav", "pcm"):
@@ -68,9 +92,9 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
                 status_code=400,
                 detail=f"Unsupported response_format '{req.response_format}'. Supported: wav, pcm",
             )
-        wav_bytes = state.tts_engine.synthesize(req.input)
+        wav_bytes: bytes = state.tts_engine.synthesize(req.input)
         if req.response_format == "pcm":
-            pcm_data = _wav_to_pcm(wav_bytes)
+            pcm_data: bytes = _wav_to_pcm(wav_bytes)
             return Response(content=pcm_data, media_type="audio/pcm")
         return Response(content=wav_bytes, media_type="audio/wav")
 
@@ -86,18 +110,19 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
         if state.stt_engine is None:
             raise HTTPException(status_code=503, detail="STT engine not available")
 
-        audio_bytes = await file.read()
+        audio_bytes: bytes = await file.read()
 
         # Normalize audio to 16kHz mono 16-bit PCM
-        pcm_bytes, sample_rate, n_channels, sampwidth = _extract_and_normalize(audio_bytes)
-        duration = len(pcm_bytes) / (16000 * 2)  # normalized to 16kHz 16-bit mono
+        pcm_bytes: bytes
+        pcm_bytes, _, _, _ = _extract_and_normalize(audio_bytes)
+        duration: float = len(pcm_bytes) / (16000 * 2)  # normalized to 16kHz 16-bit mono
 
         # Feed audio in chunks to the STT engine
-        chunk_size = 4000
+        chunk_size: int = 4000
         for i in range(0, len(pcm_bytes), chunk_size):
             state.stt_engine.process_audio(pcm_bytes[i : i + chunk_size])
 
-        result = state.stt_engine.finalize()
+        result: STTResult = state.stt_engine.finalize()
         state.stt_engine.reset()
 
         if response_format == "text":
@@ -121,8 +146,8 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
 
         await websocket.accept()
 
-        session_id = f"sess_{uuid.uuid4().hex[:24]}"
-        session_config = {
+        session_id: str = f"sess_{uuid.uuid4().hex[:24]}"
+        session_config: dict[str, Any] = {
             "id": session_id,
             "input_audio_format": "pcm16",
             "input_audio_transcription": {
@@ -135,7 +160,7 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
                 "silence_duration_ms": 500,
             },
         }
-        item_counter = 0
+        item_counter: int = 0
 
         # Send session.created
         await websocket.send_json({
@@ -147,11 +172,11 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
 
         try:
             while True:
-                message = await websocket.receive_json()
-                event_type = message.get("type", "")
+                message: dict[str, Any] = await websocket.receive_json()
+                event_type: str = message.get("type", "")
 
                 if event_type == "transcription_session.update":
-                    new_session = message.get("session", {})
+                    new_session: dict[str, Any] = message.get("session", {})
                     if "input_audio_format" in new_session:
                         session_config["input_audio_format"] = new_session["input_audio_format"]
                     if "input_audio_transcription" in new_session:
@@ -164,9 +189,9 @@ def create_app(stt_engine=None, tts_engine=None) -> FastAPI:
                     })
 
                 elif event_type == "input_audio_buffer.append":
-                    audio_b64 = message.get("audio", "")
-                    audio_data = base64.b64decode(audio_b64)
-                    result = state.stt_engine.process_audio(audio_data)
+                    audio_b64: str = message.get("audio", "")
+                    audio_data: bytes = base64.b64decode(audio_b64)
+                    result: STTResult = state.stt_engine.process_audio(audio_data)
                     if result.text:
                         await websocket.send_json({
                             "type": "conversation.item.input_audio_transcription.delta",
@@ -220,10 +245,10 @@ def _extract_and_normalize(audio_bytes: bytes) -> tuple[bytes, int, int, int]:
     if audio_bytes[:4] == b"RIFF":
         try:
             with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
-                n_channels = wf.getnchannels()
-                sampwidth = wf.getsampwidth()
-                orig_rate = wf.getframerate()
-                raw_data = wf.readframes(wf.getnframes())
+                n_channels: int = wf.getnchannels()
+                sampwidth: int = wf.getsampwidth()
+                orig_rate: int = wf.getframerate()
+                raw_data: bytes = wf.readframes(wf.getnframes())
 
             # Convert to mono by averaging channels
             if n_channels > 1:
@@ -255,30 +280,30 @@ def _extract_and_normalize(audio_bytes: bytes) -> tuple[bytes, int, int, int]:
 
 def _to_mono(data: bytes, sampwidth: int, n_channels: int) -> bytes:
     """Average interleaved channels down to mono."""
-    n_frames = len(data) // (sampwidth * n_channels)
-    fmt = {1: "B", 2: "h", 4: "i"}[sampwidth]
-    samples = struct.unpack(f"<{n_frames * n_channels}{fmt}", data)
-    mono = []
+    n_frames: int = len(data) // (sampwidth * n_channels)
+    fmt: str = {1: "B", 2: "h", 4: "i"}[sampwidth]
+    samples: tuple[int, ...] = struct.unpack(f"<{n_frames * n_channels}{fmt}", data)
+    mono: list[int] = []
     for i in range(0, len(samples), n_channels):
-        avg = sum(samples[i : i + n_channels]) // n_channels
+        avg: int = sum(samples[i : i + n_channels]) // n_channels
         mono.append(avg)
     return struct.pack(f"<{len(mono)}{fmt}", *mono)
 
 
 def _resample(data: bytes, src_rate: int, dst_rate: int) -> bytes:
     """Resample 16-bit mono PCM via linear interpolation."""
-    samples = array.array("h")
+    samples: array.array[int] = array.array("h")
     samples.frombytes(data)
-    n = len(samples)
+    n: int = len(samples)
     if n == 0:
         return data
-    ratio = src_rate / dst_rate
-    out_len = int(n / ratio)
-    out = array.array("h", [0] * out_len)
+    ratio: float = src_rate / dst_rate
+    out_len: int = int(n / ratio)
+    out: array.array[int] = array.array("h", [0] * out_len)
     for i in range(out_len):
-        pos = i * ratio
-        idx = int(pos)
-        frac = pos - idx
+        pos: float = i * ratio
+        idx: int = int(pos)
+        frac: float = pos - idx
         if idx + 1 < n:
             out[i] = int(samples[idx] * (1 - frac) + samples[idx + 1] * frac)
         else:

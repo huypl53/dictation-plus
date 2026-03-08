@@ -8,7 +8,7 @@ import sys
 
 import httpx
 
-from dictation.config import load_config
+from dictation.config import DictationConfig, load_config
 
 DEFAULT_BASE_URL = "http://127.0.0.1:{port}"
 
@@ -33,9 +33,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-    config = load_config()
-    base_url = DEFAULT_BASE_URL.format(port=config.api_port)
+    args: argparse.Namespace = parse_args(argv)
+    config: DictationConfig = load_config()
+    base_url: str = DEFAULT_BASE_URL.format(port=config.api_port)
 
     if args.command == "start":
         _cmd_start(config)
@@ -49,19 +49,19 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_listen(base_url, save_audio=getattr(args, "save_audio", None))
 
 
-def _cmd_start(config):
+def _cmd_start(config: DictationConfig) -> None:
     from dictation.daemon import DictationDaemon
-    daemon = DictationDaemon(config=config)
+    daemon: DictationDaemon = DictationDaemon(config=config)
     print(f"Starting dictation daemon on port {config.api_port}...")
     print(f"Hotkey: {config.hotkey}")
     daemon.run()
 
 
-def _cmd_stop(base_url: str):
+def _cmd_stop(base_url: str) -> None:
     try:
-        resp = httpx.post(f"{base_url}/stop")
+        resp: httpx.Response = httpx.post(f"{base_url}/stop")
         if resp.status_code == 200:
-            data = resp.json()
+            data: dict[str, str] = resp.json()
             if data.get("text"):
                 print(f"Dictation stopped. Final text: {data['text']}")
             else:
@@ -73,10 +73,10 @@ def _cmd_stop(base_url: str):
         sys.exit(1)
 
 
-def _cmd_status(base_url: str):
+def _cmd_status(base_url: str) -> None:
     try:
-        resp = httpx.get(f"{base_url}/status")
-        data = resp.json()
+        resp: httpx.Response = httpx.get(f"{base_url}/status")
+        data: dict[str, object] = resp.json()
         print(f"Status: {data['status']}")
         print(f"Listening: {data['listening']}")
         print(f"STT available: {data.get('stt_available', False)}")
@@ -86,9 +86,9 @@ def _cmd_status(base_url: str):
         sys.exit(1)
 
 
-def _cmd_say(base_url: str, text: str):
+def _cmd_say(base_url: str, text: str) -> None:
     try:
-        resp = httpx.post(
+        resp: httpx.Response = httpx.post(
             f"{base_url}/v1/audio/speech",
             json={"model": "piper", "input": text, "voice": "alloy"},
         )
@@ -97,8 +97,8 @@ def _cmd_say(base_url: str, text: str):
             import wave
             from dictation.audio import AudioPlayback
             with wave.open(io.BytesIO(resp.content), "rb") as wf:
-                pcm_data = wf.readframes(wf.getnframes())
-            playback = AudioPlayback()
+                pcm_data: bytes = wf.readframes(wf.getnframes())
+            playback: AudioPlayback = AudioPlayback()
             playback.play_raw(pcm_data)
         else:
             print(f"Error: {resp.status_code}", file=sys.stderr)
@@ -107,19 +107,19 @@ def _cmd_say(base_url: str, text: str):
         sys.exit(1)
 
 
-def _cmd_listen(base_url: str, save_audio: str | None = None):
+def _cmd_listen(base_url: str, save_audio: str | None = None) -> None:
     try:
         import websockets.sync.client as ws_client
         from websockets.exceptions import InvalidURI, WebSocketException
         from dictation.audio import AudioCapture
 
-        capture = AudioCapture(sample_rate=16000)
+        capture: AudioCapture = AudioCapture(sample_rate=16000)
         capture.start()
 
         audio_chunks: list[bytes] = []
 
         # Connect to OpenAI-compatible realtime WebSocket
-        ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url: str = base_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url}/v1/realtime?intent=transcription"
 
         print("Listening... Press Ctrl+C to stop.")
@@ -132,12 +132,12 @@ def _cmd_listen(base_url: str, save_audio: str | None = None):
 
         with ws:
             # Receive session.created
-            msg = json.loads(ws.recv())
+            msg: dict[str, object] = json.loads(ws.recv())
             assert msg["type"] == "session.created"
 
             try:
                 while True:
-                    data = capture.read(timeout=0.5)
+                    data: bytes | None = capture.read(timeout=0.5)
                     if data:
                         if save_audio:
                             audio_chunks.append(data)
@@ -149,7 +149,7 @@ def _cmd_listen(base_url: str, save_audio: str | None = None):
                         # Check for transcription deltas
                         try:
                             ws.settimeout(0.1)
-                            result = json.loads(ws.recv())
+                            result: dict[str, object] = json.loads(ws.recv())
                             if result["type"] == "conversation.item.input_audio_transcription.delta":
                                 print(f"... {result['delta']}", end="\r")
                             elif result["type"] == "conversation.item.input_audio_transcription.completed":
