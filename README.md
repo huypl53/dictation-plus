@@ -8,7 +8,7 @@ Uses [Vosk](https://alphacephei.com/vosk/) (Linux) or [Whisper](https://github.c
 
 - **System-wide dictation** — press `Super+D` to toggle, text appears in the focused window
 - **Real-time streaming** — words appear as you speak (not batch)
-- **Local REST/WebSocket API** — integrate with other apps via `localhost:5678`
+- **OpenAI-compatible API** — drop-in replacement for OpenAI audio endpoints on `localhost:5678`
 - **Text-to-speech** — natural-sounding voices via Piper
 - **CPU-only** — no GPU needed, runs on modest hardware
 - **English by default** — other languages available via model swap
@@ -69,7 +69,7 @@ dictation say "text"  # Speak text aloud
 dictation listen      # One-shot STT, prints to stdout
 ```
 
-### API
+### API (OpenAI-compatible)
 
 While the daemon is running:
 
@@ -77,18 +77,22 @@ While the daemon is running:
 # Status
 curl http://localhost:5678/status
 
-# Text-to-speech
-curl -X POST http://localhost:5678/tts \
+# Text-to-speech (POST /v1/audio/speech)
+curl -X POST http://localhost:5678/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello world"}' \
+  -d '{"model": "piper", "input": "Hello world", "voice": "alloy"}' \
   --output hello.wav
 
-# Start/stop listening
-curl -X POST http://localhost:5678/stt/start
-curl -X POST http://localhost:5678/stt/stop
+# Speech-to-text from file (POST /v1/audio/transcriptions)
+curl -X POST http://localhost:5678/v1/audio/transcriptions \
+  -F file=@audio.wav \
+  -F model=whisper-1
+
+# Stop active listening session
+curl -X POST http://localhost:5678/stop
 ```
 
-WebSocket for real-time streaming: `ws://localhost:5678/ws/stt`
+Real-time streaming transcription via WebSocket: `ws://localhost:5678/v1/realtime?intent=transcription`
 
 ## Configuration
 
@@ -144,7 +148,7 @@ Runs real Vosk STT and Piper TTS engines in an Ubuntu container — no models or
 bash tests/e2e/run_e2e.sh
 ```
 
-Tests cover: status endpoint, real TTS synthesis, WebSocket STT, full TTS→STT round-trip, and CLI status.
+Tests cover: status endpoint, real TTS synthesis, batch transcription, realtime WebSocket STT, full TTS→STT round-trip, and CLI status.
 
 ### Live demo (Docker)
 
@@ -163,18 +167,19 @@ Then from another terminal:
 curl http://localhost:5678/status
 
 # Generate speech → save WAV
-curl -s -X POST http://localhost:5678/tts \
+curl -s -X POST http://localhost:5678/v1/audio/speech \
   -H 'Content-Type: application/json' \
-  -d '{"text": "Hello world, this is a test."}' \
+  -d '{"model": "piper", "input": "Hello world, this is a test.", "voice": "alloy"}' \
   -o /tmp/hello.wav
 
 # Play it
 aplay /tmp/hello.wav        # ALSA
 # or: ffplay -nodisp /tmp/hello.wav
 
-# Stream STT via WebSocket (using websocat)
-arecord -f S16_LE -r 16000 -c 1 -t raw | \
-  websocat ws://localhost:5678/ws/stt --binary
+# Transcribe an audio file
+curl -X POST http://localhost:5678/v1/audio/transcriptions \
+  -F file=@/tmp/hello.wav \
+  -F model=whisper-1
 ```
 
 ## Architecture
@@ -184,7 +189,7 @@ dictation start
   └─ DictationDaemon
        ├─ Vosk/Whisper STT (speech recognition)
        ├─ Piper TTS (on-demand synthesis)
-       ├─ FastAPI (REST + WebSocket on localhost:5678)
+       ├─ FastAPI (OpenAI-compatible REST + WebSocket on localhost:5678)
        ├─ pynput (global hotkey listener)
        └─ xdotool/wtype/AppleScript (text injection into focused window)
 ```

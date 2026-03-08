@@ -148,8 +148,7 @@ def _cmd_listen(base_url: str, save_audio: str | None = None) -> None:
                         }))
                         # Check for transcription deltas
                         try:
-                            ws.settimeout(0.1)
-                            result: dict[str, object] = json.loads(ws.recv())
+                            result: dict[str, object] = json.loads(ws.recv(timeout=0.1))
                             if result["type"] == "conversation.item.input_audio_transcription.delta":
                                 print(f"... {result['delta']}", end="\r")
                             elif result["type"] == "conversation.item.input_audio_transcription.completed":
@@ -158,10 +157,9 @@ def _cmd_listen(base_url: str, save_audio: str | None = None) -> None:
                             pass
             except KeyboardInterrupt:
                 # Commit buffer to get final transcription
-                ws.settimeout(5.0)
                 ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                 while True:
-                    result = json.loads(ws.recv())
+                    result = json.loads(ws.recv(timeout=5.0))
                     if result["type"] == "conversation.item.input_audio_transcription.completed":
                         if result["transcript"]:
                             print(result["transcript"])

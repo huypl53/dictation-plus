@@ -145,19 +145,17 @@ def test_stt_via_websocket(running_server):
             }))
             # Check for any delta responses
             try:
-                ws.settimeout(0.1)
-                result = json.loads(ws.recv())
+                result = json.loads(ws.recv(timeout=0.1))
                 if result["type"] == "conversation.item.input_audio_transcription.delta":
                     collected_text.append(result["delta"])
             except TimeoutError:
                 pass
 
         # Commit the buffer to get final transcription
-        ws.settimeout(5.0)
         ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
         # Receive committed + completed events
         while True:
-            result = json.loads(ws.recv())
+            result = json.loads(ws.recv(timeout=5.0))
             if result["type"] == "conversation.item.input_audio_transcription.completed":
                 if result["transcript"]:
                     collected_text.append(result["transcript"])
