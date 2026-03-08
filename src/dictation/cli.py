@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import sys
 
 import httpx
@@ -57,8 +59,15 @@ def _cmd_start(config):
 
 def _cmd_stop(base_url: str):
     try:
-        resp = httpx.post(f"{base_url}/stt/stop")
-        print("Dictation stopped.")
+        resp = httpx.post(f"{base_url}/stop")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("text"):
+                print(f"Dictation stopped. Final text: {data['text']}")
+            else:
+                print("Dictation stopped.")
+        else:
+            print(f"Error: {resp.status_code}", file=sys.stderr)
     except httpx.ConnectError:
         print("Daemon is not running.", file=sys.stderr)
         sys.exit(1)
@@ -79,11 +88,18 @@ def _cmd_status(base_url: str):
 
 def _cmd_say(base_url: str, text: str):
     try:
-        resp = httpx.post(f"{base_url}/tts", json={"text": text})
+        resp = httpx.post(
+            f"{base_url}/v1/audio/speech",
+            json={"model": "piper", "input": text, "voice": "alloy"},
+        )
         if resp.status_code == 200:
+            import io
+            import wave
             from dictation.audio import AudioPlayback
+            with wave.open(io.BytesIO(resp.content), "rb") as wf:
+                pcm_data = wf.readframes(wf.getnframes())
             playback = AudioPlayback()
-            playback.play_raw(resp.content[44:])  # skip WAV header
+            playback.play_raw(pcm_data)
         else:
             print(f"Error: {resp.status_code}", file=sys.stderr)
     except httpx.ConnectError:
@@ -93,37 +109,65 @@ def _cmd_say(base_url: str, text: str):
 
 def _cmd_listen(base_url: str, save_audio: str | None = None):
     try:
-        import json
         import websockets.sync.client as ws_client
-        resp = httpx.post(f"{base_url}/stt/start")
-        ws_url = resp.json()["ws_url"]
-
+        from websockets.exceptions import InvalidURI, WebSocketException
         from dictation.audio import AudioCapture
+
         capture = AudioCapture(sample_rate=16000)
         capture.start()
 
         audio_chunks: list[bytes] = []
 
+        # Connect to OpenAI-compatible realtime WebSocket
+        ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/v1/realtime?intent=transcription"
+
         print("Listening... Press Ctrl+C to stop.")
-        with ws_client.connect(ws_url) as ws:
+        try:
+            ws = ws_client.connect(ws_url)
+        except (OSError, WebSocketException) as exc:
+            capture.stop()
+            print("Daemon is not running.", file=sys.stderr)
+            sys.exit(1)
+
+        with ws:
+            # Receive session.created
+            msg = json.loads(ws.recv())
+            assert msg["type"] == "session.created"
+
             try:
                 while True:
                     data = capture.read(timeout=0.5)
                     if data:
                         if save_audio:
                             audio_chunks.append(data)
-                        ws.send(data)
-                        result = ws.recv()
-                        parsed = json.loads(result)
-                        if parsed.get("is_final"):
-                            print(parsed["text"])
-                        else:
-                            print(f"... {parsed['text']}", end="\r")
+                        # Send audio as base64 via OpenAI protocol
+                        ws.send(json.dumps({
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(data).decode(),
+                        }))
+                        # Check for transcription deltas
+                        try:
+                            ws.settimeout(0.1)
+                            result = json.loads(ws.recv())
+                            if result["type"] == "conversation.item.input_audio_transcription.delta":
+                                print(f"... {result['delta']}", end="\r")
+                            elif result["type"] == "conversation.item.input_audio_transcription.completed":
+                                print(result["transcript"])
+                        except TimeoutError:
+                            pass
             except KeyboardInterrupt:
-                pass
+                # Commit buffer to get final transcription
+                ws.settimeout(5.0)
+                ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                while True:
+                    result = json.loads(ws.recv())
+                    if result["type"] == "conversation.item.input_audio_transcription.completed":
+                        if result["transcript"]:
+                            print(result["transcript"])
+                        break
             finally:
                 capture.stop()
-                httpx.post(f"{base_url}/stt/stop")
                 if save_audio and audio_chunks:
                     _save_debug_audio(save_audio, b"".join(audio_chunks))
                 print("\nDone.")

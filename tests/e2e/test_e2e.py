@@ -1,7 +1,7 @@
 """End-to-end tests with real Vosk STT and Piper TTS engines."""
 from __future__ import annotations
 
-import audioop
+import base64
 import io
 import json
 import os
@@ -30,27 +30,17 @@ BASE_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
 def resample_wav_to_16k(wav_bytes: bytes) -> bytes:
     """Resample WAV audio to 16kHz mono 16-bit PCM for Vosk."""
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        n_channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        orig_rate = wf.getframerate()
-        raw_data = wf.readframes(wf.getnframes())
+    from dictation.api import _extract_and_normalize
 
-    # Convert to mono if stereo
-    if n_channels == 2:
-        raw_data = audioop.tomono(raw_data, sampwidth, 1, 1)
-
-    # Resample to 16000 Hz
-    if orig_rate != 16000:
-        raw_data, _ = audioop.ratecv(raw_data, sampwidth, 1, orig_rate, 16000, None)
+    pcm_data, rate, channels, sampwidth = _extract_and_normalize(wav_bytes)
 
     # Write as 16kHz mono WAV
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(sampwidth)
+        wf.setsampwidth(2)
         wf.setframerate(16000)
-        wf.writeframes(raw_data)
+        wf.writeframes(pcm_data)
     return buf.getvalue()
 
 
@@ -97,10 +87,10 @@ def test_status(running_server):
 
 
 def test_tts_real_synthesis(running_server):
-    """POST /tts returns valid WAV audio from real Piper."""
+    """POST /v1/audio/speech returns valid WAV audio from real Piper."""
     resp = httpx.post(
-        f"{running_server['base_url']}/tts",
-        json={"text": "hello"},
+        f"{running_server['base_url']}/v1/audio/speech",
+        json={"model": "piper", "input": "hello", "voice": "alloy"},
         timeout=30,
     )
     assert resp.status_code == 200
@@ -120,11 +110,11 @@ def test_tts_real_synthesis(running_server):
 
 
 def test_stt_via_websocket(running_server):
-    """TTS 'hello' then feed resampled audio to STT WebSocket."""
+    """TTS 'hello' then feed resampled audio to STT via realtime WebSocket."""
     # Generate audio via TTS
     resp = httpx.post(
-        f"{running_server['base_url']}/tts",
-        json={"text": "hello"},
+        f"{running_server['base_url']}/v1/audio/speech",
+        json={"model": "piper", "input": "hello", "voice": "alloy"},
         timeout=30,
     )
     wav_bytes = resample_wav_to_16k(resp.content)
@@ -136,28 +126,73 @@ def test_stt_via_websocket(running_server):
     # Reset STT engine for a fresh recognition
     running_server["stt_engine"].reset()
 
-    # Feed audio via WebSocket in chunks
-    ws_url = f"ws://{SERVER_HOST}:{SERVER_PORT}/ws/stt"
+    # Feed audio via realtime WebSocket using OpenAI protocol
+    ws_url = f"ws://{SERVER_HOST}:{SERVER_PORT}/v1/realtime?intent=transcription"
     collected_text = []
     chunk_size = 4000  # ~125ms of 16kHz 16-bit mono
 
     with ws_client.connect(ws_url) as ws:
+        # Receive session.created
+        msg = json.loads(ws.recv())
+        assert msg["type"] == "session.created"
+
+        # Send audio chunks
         for i in range(0, len(pcm_data), chunk_size):
             chunk = pcm_data[i : i + chunk_size]
-            ws.send(chunk)
-            result = json.loads(ws.recv())
-            if result["text"]:
-                collected_text.append(result["text"])
+            ws.send(json.dumps({
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(chunk).decode(),
+            }))
+            # Check for any delta responses
+            try:
+                ws.settimeout(0.1)
+                result = json.loads(ws.recv())
+                if result["type"] == "conversation.item.input_audio_transcription.delta":
+                    collected_text.append(result["delta"])
+            except TimeoutError:
+                pass
 
-    # Finalize to get any remaining text
-    final = running_server["stt_engine"].finalize()
-    if final.text:
-        collected_text.append(final.text)
+        # Commit the buffer to get final transcription
+        ws.settimeout(5.0)
+        ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        # Receive committed + completed events
+        while True:
+            result = json.loads(ws.recv())
+            if result["type"] == "conversation.item.input_audio_transcription.completed":
+                if result["transcript"]:
+                    collected_text.append(result["transcript"])
+                break
 
     all_text = " ".join(collected_text).lower()
     print(f"\n  TTS 'hello' → STT heard: '{all_text}'")
-    # Small model may produce partial matches; just verify we got something
     assert len(all_text) > 0, "STT produced no text from TTS audio"
+
+
+def test_stt_batch_transcription(running_server):
+    """TTS generates audio, then POST /v1/audio/transcriptions transcribes it."""
+    # Generate audio via TTS
+    resp = httpx.post(
+        f"{running_server['base_url']}/v1/audio/speech",
+        json={"model": "piper", "input": "hello", "voice": "alloy"},
+        timeout=30,
+    )
+    wav_bytes = resample_wav_to_16k(resp.content)
+
+    # Reset STT engine
+    running_server["stt_engine"].reset()
+
+    # Submit audio for batch transcription
+    resp = httpx.post(
+        f"{running_server['base_url']}/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+        data={"model": "whisper-1"},
+        timeout=30,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "text" in data
+    print(f"\n  Batch transcription: '{data['text']}'")
+    assert len(data["text"]) > 0, "Batch transcription produced no text"
 
 
 def test_round_trip(running_server):
@@ -166,8 +201,8 @@ def test_round_trip(running_server):
 
     # Generate audio
     resp = httpx.post(
-        f"{running_server['base_url']}/tts",
-        json={"text": test_phrase},
+        f"{running_server['base_url']}/v1/audio/speech",
+        json={"model": "piper", "input": test_phrase, "voice": "alloy"},
         timeout=30,
     )
     wav_bytes = resample_wav_to_16k(resp.content)
@@ -208,12 +243,7 @@ def test_round_trip(running_server):
 
 
 def test_cli_status(running_server):
-    """CLI status logic works against the running server.
-
-    The CLI reads config which defaults to port 5678, but our test server
-    runs on a different port. We test the CLI's _cmd_status function
-    directly with the correct base_url.
-    """
+    """CLI status logic works against the running server."""
     from dictation.cli import _cmd_status
     from io import StringIO
     import contextlib

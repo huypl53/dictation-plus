@@ -12,6 +12,7 @@ dependencies = [
     "faster-whisper>=1.0.0; sys_platform == 'darwin'",
     "piper-tts>=1.4.0",
     "fastapi>=0.115.0",
+    "python-multipart>=0.0.18",
     "uvicorn[standard]>=0.30.0",
     "sounddevice>=0.5.0",
     "pynput>=1.7.0",
