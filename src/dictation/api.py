@@ -37,7 +37,7 @@ class SpeechRequest(BaseModel):
     model: str
     input: str
     voice: str = "alloy"
-    response_format: str = "wav"
+    response_format: str = "mp3"
     speed: float = 1.0
 
 
@@ -104,10 +104,11 @@ def create_app(
     async def create_speech(req: SpeechRequest) -> Response:
         if state.tts_pool is None:
             raise HTTPException(status_code=503, detail="TTS engine not available")
-        if req.response_format not in ("wav", "pcm"):
+        supported = ("mp3", "wav", "pcm")
+        if req.response_format not in supported:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported response_format '{req.response_format}'. Supported: wav, pcm",
+                detail=f"Unsupported response_format '{req.response_format}'. Supported: {', '.join(supported)}",
             )
         loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
         async with state.tts_pool.checkout() as tts:
@@ -115,6 +116,9 @@ def create_app(
         if req.response_format == "pcm":
             pcm_data: bytes = _wav_to_pcm(wav_bytes)
             return Response(content=pcm_data, media_type="audio/pcm")
+        if req.response_format == "mp3":
+            mp3_data: bytes = _wav_to_mp3(wav_bytes)
+            return Response(content=mp3_data, media_type="audio/mpeg")
         return Response(content=wav_bytes, media_type="audio/wav")
 
     # ── STT: POST /v1/audio/transcriptions ──────────────────────────────
@@ -286,6 +290,26 @@ def _wav_to_pcm(wav_bytes: bytes) -> bytes:
     """Extract raw PCM frames from a WAV container."""
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         return wf.readframes(wf.getnframes())
+
+
+def _wav_to_mp3(wav_bytes: bytes) -> bytes:
+    """Convert WAV bytes to MP3 using lameenc."""
+    import lameenc
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        pcm_data: bytes = wf.readframes(wf.getnframes())
+        sample_rate: int = wf.getframerate()
+        channels: int = wf.getnchannels()
+        bit_depth: int = wf.getsampwidth() * 8
+
+    encoder = lameenc.Encoder()
+    encoder.set_in_sample_rate(sample_rate)
+    encoder.set_channels(channels)
+    encoder.set_bit_rate(128)
+    encoder.set_quality(2)
+    mp3_data = encoder.encode(pcm_data)
+    mp3_data += encoder.flush()
+    return bytes(mp3_data)
 
 
 _TARGET_RATE: int = 16000

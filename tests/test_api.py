@@ -67,14 +67,24 @@ async def test_get_status(client):
 # ── TTS: POST /v1/audio/speech ──────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_create_speech(client, mock_tts):
+async def test_create_speech_default_mp3(client, mock_tts):
     resp = await client.post(
         "/v1/audio/speech",
         json={"model": "piper", "input": "hello", "voice": "alloy"},
     )
     assert resp.status_code == 200
-    assert resp.headers["content-type"] == "audio/wav"
+    assert resp.headers["content-type"] == "audio/mpeg"
     mock_tts.synthesize.assert_called_once_with("hello")
+
+
+@pytest.mark.asyncio
+async def test_create_speech_wav_format(client, mock_tts):
+    resp = await client.post(
+        "/v1/audio/speech",
+        json={"model": "piper", "input": "hello", "voice": "alloy", "response_format": "wav"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
 
 
 @pytest.mark.asyncio
@@ -87,7 +97,7 @@ async def test_create_speech_missing_input(client):
 async def test_create_speech_unsupported_format(client):
     resp = await client.post(
         "/v1/audio/speech",
-        json={"model": "piper", "input": "hi", "voice": "alloy", "response_format": "mp3"},
+        json={"model": "piper", "input": "hi", "voice": "alloy", "response_format": "ogg"},
     )
     assert resp.status_code == 400
 
