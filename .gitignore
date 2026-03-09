@@ -40,3 +40,4 @@ models/
 
 # Config (user-specific)
 config.toml
+Session.vim

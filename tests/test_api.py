@@ -196,3 +196,40 @@ async def test_transcription_503_without_engine(client_no_engines):
         data={"model": "whisper-1"},
     )
     assert resp.status_code == 503
+
+
+# ── DaemonControl integration ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_status_reflects_daemon_listening():
+    daemon = MagicMock()
+    daemon.is_listening = True
+    app = create_app(daemon=daemon)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/status")
+    assert resp.json()["listening"] is True
+
+
+@pytest.mark.asyncio
+async def test_stop_calls_daemon():
+    daemon = MagicMock()
+    daemon.stop_listening.return_value = "final text"
+    app = create_app(daemon=daemon)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post("/stop")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["text"] == "final text"
+    daemon.stop_listening.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_status_default_not_listening():
+    """Without a daemon, status.listening defaults to False."""
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/status")
+    assert resp.json()["listening"] is False

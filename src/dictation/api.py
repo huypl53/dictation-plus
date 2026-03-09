@@ -41,6 +41,25 @@ class SpeechRequest(BaseModel):
     speed: float = 1.0
 
 
+class DaemonControl(Protocol):
+    """Protocol for the daemon's control interface exposed to the API."""
+
+    @property
+    def is_listening(self) -> bool: ...
+    def stop_listening(self) -> str: ...
+
+
+class _NullDaemonControl:
+    """Stub when no daemon is attached (e.g. standalone API server)."""
+
+    @property
+    def is_listening(self) -> bool:
+        return False
+
+    def stop_listening(self) -> str:
+        return ""
+
+
 class DictationState:
     """Shared state for the API."""
 
@@ -48,33 +67,36 @@ class DictationState:
         self,
         stt_pool: EnginePool[STTEngineProto] | None = None,
         tts_pool: EnginePool[TTSEngineProto] | None = None,
+        daemon: DaemonControl | None = None,
     ):
         self.stt_pool: EnginePool[STTEngineProto] | None = stt_pool
         self.tts_pool: EnginePool[TTSEngineProto] | None = tts_pool
-        self.is_listening: bool = False
+        self.daemon: DaemonControl = daemon or _NullDaemonControl()
 
 
 def create_app(
     stt_pool: EnginePool[STTEngineProto] | None = None,
     tts_pool: EnginePool[TTSEngineProto] | None = None,
+    daemon: DaemonControl | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Dictation Service")
-    state = DictationState(stt_pool=stt_pool, tts_pool=tts_pool)
+    state = DictationState(stt_pool=stt_pool, tts_pool=tts_pool, daemon=daemon)
     app.state.dictation = state
 
     @app.get("/status")
     async def get_status() -> dict[str, object]:
         return {
             "status": "running",
-            "listening": state.is_listening,
+            "listening": state.daemon.is_listening,
             "stt_available": state.stt_pool is not None,
             "tts_available": state.tts_pool is not None,
         }
 
     @app.post("/stop")
     async def stop_listening() -> dict[str, str]:
-        state.is_listening = False
-        return {"status": "stopped", "text": ""}
+        loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        text: str = await loop.run_in_executor(None, state.daemon.stop_listening)
+        return {"status": "stopped", "text": text}
 
     # ── TTS: POST /v1/audio/speech ──────────────────────────────────────
 
@@ -169,10 +191,35 @@ def create_app(
 
             await loop.run_in_executor(None, stt.reset)
 
+            _KNOWN_EVENTS: set[str] = {
+                "transcription_session.update",
+                "input_audio_buffer.append",
+                "input_audio_buffer.commit",
+                "input_audio_buffer.clear",
+            }
+
             try:
                 while True:
-                    message: dict[str, Any] = await websocket.receive_json()
+                    try:
+                        message: dict[str, Any] = await websocket.receive_json()
+                    except (ValueError, KeyError):
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": {"message": "Invalid JSON", "type": "invalid_request_error"},
+                        })
+                        continue
+
                     event_type: str = message.get("type", "")
+
+                    if not event_type or event_type not in _KNOWN_EVENTS:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": {
+                                "message": f"Unknown event type: '{event_type}'",
+                                "type": "invalid_request_error",
+                            },
+                        })
+                        continue
 
                     if event_type == "transcription_session.update":
                         new_session: dict[str, Any] = message.get("session", {})
@@ -189,7 +236,14 @@ def create_app(
 
                     elif event_type == "input_audio_buffer.append":
                         audio_b64: str = message.get("audio", "")
-                        audio_data: bytes = base64.b64decode(audio_b64)
+                        try:
+                            audio_data: bytes = base64.b64decode(audio_b64, validate=True)
+                        except Exception:
+                            await websocket.send_json({
+                                "type": "error",
+                                "error": {"message": "Invalid base64 in 'audio' field", "type": "invalid_request_error"},
+                            })
+                            continue
                         result: STTResult = await loop.run_in_executor(
                             None, stt.process_audio, audio_data
                         )

@@ -1,8 +1,10 @@
 """Dictation daemon — ties STT, TTS, audio, hotkey, and API together."""
 from __future__ import annotations
 
+import io
 import logging
 import threading
+import wave
 
 from dictation.audio import AudioCapture, AudioPlayback
 from dictation.config import DictationConfig, load_config
@@ -84,6 +86,24 @@ class DictationDaemon:
         self._last_partial = ""
         logger.info("Dictation stopped")
 
+    def stop_listening(self) -> str:
+        """Stop dictation and return the final transcribed text (DaemonControl protocol)."""
+        if not self._is_listening:
+            return ""
+        self._is_listening = False
+        self._capture.stop()
+        text: str = ""
+        if self._stt:
+            result: STTResult = self._stt.finalize()
+            text = result.text
+            if text:
+                if self._last_partial:
+                    self._injector.backspace(len(self._last_partial))
+                self._injector.type_text(text)
+        self._last_partial = ""
+        logger.info("Dictation stopped via API")
+        return text
+
     def _listen_loop(self) -> None:
         """Background thread that processes audio chunks."""
         while self._is_listening:
@@ -111,7 +131,22 @@ class DictationDaemon:
         """Speak text aloud using TTS."""
         tts = self._ensure_tts()
         wav_bytes = tts.synthesize(text)
-        self._playback.play_raw(wav_bytes[44:])  # skip WAV header
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            pcm_data: bytes = wf.readframes(wf.getnframes())
+        self._playback.play_raw(pcm_data)
+
+    def _ensure_models_downloaded(self) -> None:
+        """Download models if needed, without instantiating engines."""
+        engine = self._config.stt_engine
+        if engine == "whisper":
+            pass  # Whisper downloads on first use internally
+        else:
+            if not self._model_mgr.is_vosk_model_available(self._config.stt_model):
+                logger.info("Downloading Vosk model: %s", self._config.stt_model)
+                self._model_mgr.download_vosk_model(self._config.stt_model)
+        if not self._model_mgr.is_piper_model_available(self._config.tts_voice):
+            logger.info("Downloading Piper voice: %s", self._config.tts_voice)
+            self._model_mgr.download_piper_voice(self._config.tts_voice)
 
     def _create_stt_engine(self):
         """Create a new STT engine instance (for pool factory use)."""
@@ -140,15 +175,14 @@ class DictationDaemon:
         from dictation.api import create_app
         from dictation.pool import EnginePool
 
-        # Ensure models are downloaded before creating pools
-        self._ensure_stt()
-        self._ensure_tts()
+        # Download models eagerly (but don't instantiate engines yet — pools create on demand)
+        self._ensure_models_downloaded()
 
         stt_pool = EnginePool(
             self._create_stt_engine, max_size=2, on_release=lambda e: e.reset()
         )
         tts_pool = EnginePool(self._create_tts_engine, max_size=2)
-        app = create_app(stt_pool=stt_pool, tts_pool=tts_pool)
+        app = create_app(stt_pool=stt_pool, tts_pool=tts_pool, daemon=self)
 
         # Parse hotkey — convert "super+d" to "<cmd>+d"
         hotkey_str = self._config.hotkey.replace("super", "<cmd>")
