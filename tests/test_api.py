@@ -8,6 +8,7 @@ import pytest
 from unittest.mock import MagicMock
 from httpx import AsyncClient, ASGITransport
 from dictation.api import create_app
+from dictation.pool import EnginePool
 from dictation.stt import STTResult
 
 
@@ -39,7 +40,9 @@ def mock_tts():
 
 @pytest.fixture
 def app(mock_stt, mock_tts):
-    return create_app(stt_engine=mock_stt, tts_engine=mock_tts)
+    stt_pool = EnginePool(lambda: mock_stt, max_size=1)
+    tts_pool = EnginePool(lambda: mock_tts, max_size=1)
+    return create_app(stt_pool=stt_pool, tts_pool=tts_pool)
 
 
 @pytest.fixture
@@ -91,7 +94,6 @@ async def test_create_speech_unsupported_format(client):
 
 @pytest.mark.asyncio
 async def test_create_speech_pcm_format(client, mock_tts):
-    # Mock returns "RIFF" + 100 zero bytes; PCM strips the 44-byte header
     resp = await client.post(
         "/v1/audio/speech",
         json={"model": "piper", "input": "hi", "voice": "alloy", "response_format": "pcm"},
@@ -114,7 +116,6 @@ async def test_create_transcription_json(client, mock_stt):
     data = resp.json()
     assert data["text"] == "hello world"
     mock_stt.finalize.assert_called_once()
-    mock_stt.reset.assert_called_once()
 
 
 @pytest.mark.asyncio

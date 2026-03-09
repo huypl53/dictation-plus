@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import array
+import asyncio
 import base64
 import io
 import struct
@@ -13,6 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, W
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
+from dictation.pool import EnginePool
 from dictation.stt import STTResult
 
 
@@ -44,55 +46,50 @@ class DictationState:
 
     def __init__(
         self,
-        stt_engine: STTEngineProto | None = None,
-        tts_engine: TTSEngineProto | None = None,
+        stt_pool: EnginePool[STTEngineProto] | None = None,
+        tts_pool: EnginePool[TTSEngineProto] | None = None,
     ):
-        self.stt_engine: STTEngineProto | None = stt_engine
-        self.tts_engine: TTSEngineProto | None = tts_engine
+        self.stt_pool: EnginePool[STTEngineProto] | None = stt_pool
+        self.tts_pool: EnginePool[TTSEngineProto] | None = tts_pool
         self.is_listening: bool = False
 
 
 def create_app(
-    stt_engine: STTEngineProto | None = None,
-    tts_engine: TTSEngineProto | None = None,
+    stt_pool: EnginePool[STTEngineProto] | None = None,
+    tts_pool: EnginePool[TTSEngineProto] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Dictation Service")
-    state = DictationState(stt_engine=stt_engine, tts_engine=tts_engine)
+    state = DictationState(stt_pool=stt_pool, tts_pool=tts_pool)
     app.state.dictation = state
 
     @app.get("/status")
-    async def get_status():
+    async def get_status() -> dict[str, object]:
         return {
             "status": "running",
             "listening": state.is_listening,
-            "stt_available": state.stt_engine is not None,
-            "tts_available": state.tts_engine is not None,
+            "stt_available": state.stt_pool is not None,
+            "tts_available": state.tts_pool is not None,
         }
 
     @app.post("/stop")
     async def stop_listening() -> dict[str, str]:
-        if state.stt_engine is None:
-            raise HTTPException(status_code=503, detail="STT engine not available")
-        was_listening: bool = state.is_listening
         state.is_listening = False
-        if was_listening:
-            result = state.stt_engine.finalize()
-            state.stt_engine.reset()
-            return {"status": "stopped", "text": result.text}
         return {"status": "stopped", "text": ""}
 
     # ── TTS: POST /v1/audio/speech ──────────────────────────────────────
 
     @app.post("/v1/audio/speech")
     async def create_speech(req: SpeechRequest) -> Response:
-        if state.tts_engine is None:
+        if state.tts_pool is None:
             raise HTTPException(status_code=503, detail="TTS engine not available")
         if req.response_format not in ("wav", "pcm"):
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported response_format '{req.response_format}'. Supported: wav, pcm",
             )
-        wav_bytes: bytes = state.tts_engine.synthesize(req.input)
+        loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        async with state.tts_pool.checkout() as tts:
+            wav_bytes: bytes = await loop.run_in_executor(None, tts.synthesize, req.input)
         if req.response_format == "pcm":
             pcm_data: bytes = _wav_to_pcm(wav_bytes)
             return Response(content=pcm_data, media_type="audio/pcm")
@@ -107,7 +104,7 @@ def create_app(
         language: str | None = Form(None),
         response_format: str = Form("json"),
     ):
-        if state.stt_engine is None:
+        if state.stt_pool is None:
             raise HTTPException(status_code=503, detail="STT engine not available")
 
         audio_bytes: bytes = await file.read()
@@ -115,15 +112,16 @@ def create_app(
         # Normalize audio to 16kHz mono 16-bit PCM
         pcm_bytes: bytes
         pcm_bytes, _, _, _ = _extract_and_normalize(audio_bytes)
-        duration: float = len(pcm_bytes) / (16000 * 2)  # normalized to 16kHz 16-bit mono
+        duration: float = len(pcm_bytes) / (16000 * 2)
 
-        # Feed audio in chunks to the STT engine
-        chunk_size: int = 4000
-        for i in range(0, len(pcm_bytes), chunk_size):
-            state.stt_engine.process_audio(pcm_bytes[i : i + chunk_size])
-
-        result: STTResult = state.stt_engine.finalize()
-        state.stt_engine.reset()
+        loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        async with state.stt_pool.checkout() as stt:
+            chunk_size: int = 4000
+            for i in range(0, len(pcm_bytes), chunk_size):
+                await loop.run_in_executor(
+                    None, stt.process_audio, pcm_bytes[i : i + chunk_size]
+                )
+            result: STTResult = await loop.run_in_executor(None, stt.finalize)
 
         if response_format == "text":
             return PlainTextResponse(result.text)
@@ -139,90 +137,93 @@ def create_app(
     # ── Realtime WebSocket: /v1/realtime ─────────────────────────────────
 
     @app.websocket("/v1/realtime")
-    async def realtime_transcription(websocket: WebSocket):
-        if state.stt_engine is None:
+    async def realtime_transcription(websocket: WebSocket) -> None:
+        if state.stt_pool is None:
             await websocket.close(code=1013, reason="STT engine not available")
             return
 
-        await websocket.accept()
+        async with state.stt_pool.checkout() as stt:
+            await websocket.accept()
 
-        session_id: str = f"sess_{uuid.uuid4().hex[:24]}"
-        session_config: dict[str, Any] = {
-            "id": session_id,
-            "input_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": "whisper-1",
-            },
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
-            },
-        }
-        item_counter: int = 0
+            loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+            session_id: str = f"sess_{uuid.uuid4().hex[:24]}"
+            session_config: dict[str, Any] = {
+                "id": session_id,
+                "input_audio_format": "pcm16",
+                "input_audio_transcription": {
+                    "model": "whisper-1",
+                },
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                },
+            }
+            item_counter: int = 0
 
-        # Send session.created
-        await websocket.send_json({
-            "type": "session.created",
-            "session": session_config,
-        })
+            await websocket.send_json({
+                "type": "session.created",
+                "session": session_config,
+            })
 
-        state.stt_engine.reset()
+            await loop.run_in_executor(None, stt.reset)
 
-        try:
-            while True:
-                message: dict[str, Any] = await websocket.receive_json()
-                event_type: str = message.get("type", "")
+            try:
+                while True:
+                    message: dict[str, Any] = await websocket.receive_json()
+                    event_type: str = message.get("type", "")
 
-                if event_type == "transcription_session.update":
-                    new_session: dict[str, Any] = message.get("session", {})
-                    if "input_audio_format" in new_session:
-                        session_config["input_audio_format"] = new_session["input_audio_format"]
-                    if "input_audio_transcription" in new_session:
-                        session_config["input_audio_transcription"] = new_session["input_audio_transcription"]
-                    if "turn_detection" in new_session:
-                        session_config["turn_detection"] = new_session["turn_detection"]
-                    await websocket.send_json({
-                        "type": "session.updated",
-                        "session": session_config,
-                    })
-
-                elif event_type == "input_audio_buffer.append":
-                    audio_b64: str = message.get("audio", "")
-                    audio_data: bytes = base64.b64decode(audio_b64)
-                    result: STTResult = state.stt_engine.process_audio(audio_data)
-                    if result.text:
+                    if event_type == "transcription_session.update":
+                        new_session: dict[str, Any] = message.get("session", {})
+                        if "input_audio_format" in new_session:
+                            session_config["input_audio_format"] = new_session["input_audio_format"]
+                        if "input_audio_transcription" in new_session:
+                            session_config["input_audio_transcription"] = new_session["input_audio_transcription"]
+                        if "turn_detection" in new_session:
+                            session_config["turn_detection"] = new_session["turn_detection"]
                         await websocket.send_json({
-                            "type": "conversation.item.input_audio_transcription.delta",
-                            "item_id": f"item_{item_counter:03d}",
-                            "content_index": 0,
-                            "delta": result.text,
+                            "type": "session.updated",
+                            "session": session_config,
                         })
 
-                elif event_type == "input_audio_buffer.commit":
-                    result = state.stt_engine.finalize()
-                    await websocket.send_json({
-                        "type": "input_audio_buffer.committed",
-                        "item_id": f"item_{item_counter:03d}",
-                    })
-                    await websocket.send_json({
-                        "type": "conversation.item.input_audio_transcription.completed",
-                        "item_id": f"item_{item_counter:03d}",
-                        "content_index": 0,
-                        "transcript": result.text,
-                    })
-                    item_counter += 1
-                    state.stt_engine.reset()
+                    elif event_type == "input_audio_buffer.append":
+                        audio_b64: str = message.get("audio", "")
+                        audio_data: bytes = base64.b64decode(audio_b64)
+                        result: STTResult = await loop.run_in_executor(
+                            None, stt.process_audio, audio_data
+                        )
+                        if result.text:
+                            await websocket.send_json({
+                                "type": "conversation.item.input_audio_transcription.delta",
+                                "item_id": f"item_{item_counter:03d}",
+                                "content_index": 0,
+                                "delta": result.text,
+                            })
 
-                elif event_type == "input_audio_buffer.clear":
-                    state.stt_engine.reset()
-                    await websocket.send_json({
-                        "type": "input_audio_buffer.cleared",
-                    })
+                    elif event_type == "input_audio_buffer.commit":
+                        result = await loop.run_in_executor(None, stt.finalize)
+                        await websocket.send_json({
+                            "type": "input_audio_buffer.committed",
+                            "item_id": f"item_{item_counter:03d}",
+                        })
+                        await websocket.send_json({
+                            "type": "conversation.item.input_audio_transcription.completed",
+                            "item_id": f"item_{item_counter:03d}",
+                            "content_index": 0,
+                            "transcript": result.text,
+                        })
+                        item_counter += 1
+                        await loop.run_in_executor(None, stt.reset)
 
-        except WebSocketDisconnect:
-            pass
+                    elif event_type == "input_audio_buffer.clear":
+                        await loop.run_in_executor(None, stt.reset)
+                        await websocket.send_json({
+                            "type": "input_audio_buffer.cleared",
+                        })
+
+            except WebSocketDisconnect:
+                pass
 
     return app
 
@@ -233,7 +234,7 @@ def _wav_to_pcm(wav_bytes: bytes) -> bytes:
         return wf.readframes(wf.getnframes())
 
 
-_TARGET_RATE = 16000
+_TARGET_RATE: int = 16000
 
 
 def _extract_and_normalize(audio_bytes: bytes) -> tuple[bytes, int, int, int]:

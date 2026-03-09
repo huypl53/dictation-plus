@@ -113,15 +113,42 @@ class DictationDaemon:
         wav_bytes = tts.synthesize(text)
         self._playback.play_raw(wav_bytes[44:])  # skip WAV header
 
+    def _create_stt_engine(self):
+        """Create a new STT engine instance (for pool factory use)."""
+        engine = self._config.stt_engine
+        if engine == "whisper":
+            from dictation.stt_whisper import WhisperSTTEngine
+            return WhisperSTTEngine(model_size=self._config.whisper_model)
+        else:
+            model_path = self._model_mgr.vosk_model_path(self._config.stt_model)
+            if not self._model_mgr.is_vosk_model_available(self._config.stt_model):
+                self._model_mgr.download_vosk_model(self._config.stt_model)
+            return STTEngine(model_path=str(model_path))
+
+    def _create_tts_engine(self):
+        """Create a new TTS engine instance (for pool factory use)."""
+        from dictation.tts import TTSEngine
+        model_path = self._model_mgr.piper_model_path(self._config.tts_voice)
+        if not self._model_mgr.is_piper_model_available(self._config.tts_voice):
+            self._model_mgr.download_piper_voice(self._config.tts_voice)
+        return TTSEngine(model_path=model_path)
+
     def run(self) -> None:
         """Run the daemon with hotkey listener and API server."""
         import uvicorn
         from pynput import keyboard
         from dictation.api import create_app
+        from dictation.pool import EnginePool
 
-        stt = self._ensure_stt()
-        tts = self._ensure_tts()
-        app = create_app(stt_engine=stt, tts_engine=tts)
+        # Ensure models are downloaded before creating pools
+        self._ensure_stt()
+        self._ensure_tts()
+
+        stt_pool = EnginePool(
+            self._create_stt_engine, max_size=2, on_release=lambda e: e.reset()
+        )
+        tts_pool = EnginePool(self._create_tts_engine, max_size=2)
+        app = create_app(stt_pool=stt_pool, tts_pool=tts_pool)
 
         # Parse hotkey — convert "super+d" to "<cmd>+d"
         hotkey_str = self._config.hotkey.replace("super", "<cmd>")

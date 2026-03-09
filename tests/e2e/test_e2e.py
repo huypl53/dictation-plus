@@ -17,6 +17,7 @@ import uvicorn
 import websockets.sync.client as ws_client
 
 from dictation.api import create_app
+from dictation.pool import EnginePool
 from dictation.stt import STTEngine
 from dictation.tts import TTSEngine
 
@@ -47,9 +48,16 @@ def resample_wav_to_16k(wav_bytes: bytes) -> bytes:
 @pytest.fixture(scope="module")
 def running_server():
     """Start FastAPI server with real engines, shared across all tests."""
-    stt_engine = STTEngine(model_path=VOSK_MODEL)
-    tts_engine = TTSEngine(model_path=PIPER_MODEL)
-    app = create_app(stt_engine=stt_engine, tts_engine=tts_engine)
+    stt_pool = EnginePool(
+        lambda: STTEngine(model_path=VOSK_MODEL),
+        max_size=2,
+        on_release=lambda e: e.reset(),
+    )
+    tts_pool = EnginePool(
+        lambda: TTSEngine(model_path=PIPER_MODEL),
+        max_size=2,
+    )
+    app = create_app(stt_pool=stt_pool, tts_pool=tts_pool)
 
     config = uvicorn.Config(app, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
     server = uvicorn.Server(config)
@@ -70,7 +78,7 @@ def running_server():
     else:
         raise RuntimeError("Server did not start within 15 seconds")
 
-    yield {"base_url": BASE_URL, "stt_engine": stt_engine, "tts_engine": tts_engine}
+    yield {"base_url": BASE_URL}
 
     server.should_exit = True
     thread.join(timeout=5)
@@ -123,9 +131,6 @@ def test_stt_via_websocket(running_server):
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         pcm_data = wf.readframes(wf.getnframes())
 
-    # Reset STT engine for a fresh recognition
-    running_server["stt_engine"].reset()
-
     # Feed audio via realtime WebSocket using OpenAI protocol
     ws_url = f"ws://{SERVER_HOST}:{SERVER_PORT}/v1/realtime?intent=transcription"
     collected_text = []
@@ -176,9 +181,6 @@ def test_stt_batch_transcription(running_server):
     )
     wav_bytes = resample_wav_to_16k(resp.content)
 
-    # Reset STT engine
-    running_server["stt_engine"].reset()
-
     # Submit audio for batch transcription
     resp = httpx.post(
         f"{running_server['base_url']}/v1/audio/transcriptions",
@@ -194,7 +196,7 @@ def test_stt_batch_transcription(running_server):
 
 
 def test_round_trip(running_server):
-    """TTS generates audio, STT transcribes it, verify keywords present."""
+    """TTS generates audio, STT transcribes it via batch API, verify keywords."""
     test_phrase = "testing one two three"
 
     # Generate audio
@@ -205,28 +207,15 @@ def test_round_trip(running_server):
     )
     wav_bytes = resample_wav_to_16k(resp.content)
 
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        pcm_data = wf.readframes(wf.getnframes())
-
-    # Reset STT engine
-    running_server["stt_engine"].reset()
-
-    # Feed all audio through STT directly (not via server to avoid state conflicts)
-    stt = running_server["stt_engine"]
-    chunk_size = 4000
-    collected = []
-
-    for i in range(0, len(pcm_data), chunk_size):
-        chunk = pcm_data[i : i + chunk_size]
-        result = stt.process_audio(chunk)
-        if result.text:
-            collected.append(result.text)
-
-    final = stt.finalize()
-    if final.text:
-        collected.append(final.text)
-
-    all_text = " ".join(collected).lower()
+    # Transcribe via batch API
+    resp = httpx.post(
+        f"{running_server['base_url']}/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+        data={"model": "whisper-1"},
+        timeout=30,
+    )
+    assert resp.status_code == 200
+    all_text = resp.json()["text"].lower()
 
     print(f"\n  TTS '{test_phrase}' → STT heard: '{all_text}'")
 
